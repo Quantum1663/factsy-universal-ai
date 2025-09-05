@@ -1,6 +1,8 @@
+
 version: '3.8'
 
 services:
+  # PostgreSQL Database
   postgres:
     image: postgres:15-alpine
     environment:
@@ -9,41 +11,79 @@ services:
       POSTGRES_PASSWORD: factsy_password
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./backend/sql/init.sql:/docker-entrypoint-initdb.d/init.sql
     ports:
       - "5432:5432"
+    networks:
+      - factsy-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U factsy_user -d factsy_universal"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
 
+  # Neo4j Knowledge Graph  
   neo4j:
     image: neo4j:5.12
     environment:
-      NEO4J_AUTH: neo4j/factsy_neo4j
+      NEO4J_AUTH: neo4j/factsy_neo4j_password
+      NEO4J_PLUGINS: '["graph-data-science", "apoc"]'
     volumes:
       - neo4j_data:/data
+      - neo4j_logs:/logs
     ports:
-      - "7474:7474"
-      - "7687:7687"
+      - "7474:7474"  # Neo4j Browser
+      - "7687:7687"  # Bolt protocol
+    networks:
+      - factsy-network
 
+  # Redis Cache
   redis:
     image: redis:7-alpine
+    command: redis-server --appendonly yes
     volumes:
       - redis_data:/data
     ports:
       - "6379:6379"
+    networks:
+      - factsy-network
 
+  # Backend API
   backend:
-    build: ./backend
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://factsy_user:factsy_password@postgres:5432/factsy_universal
+      - NEO4J_URI=bolt://neo4j:7687
+      - NEO4J_USER=neo4j
+      - NEO4J_PASSWORD=factsy_neo4j_password
+      - REDIS_URL=redis://redis:6379
+      - ENVIRONMENT=development
     volumes:
       - ./backend:/app
+      - ./ml-models:/app/ml-models
     ports:
       - "8000:8000"
     depends_on:
-      - postgres
-      - neo4j
-      - redis
-    environment:
-      - DATABASE_URL=postgresql://factsy_user:factsy_password@postgres:5432/factsy_universal
+      postgres:
+        condition: service_healthy
+      neo4j:
+        condition: service_started
+      redis:
+        condition: service_started
+    networks:
+      - factsy-network
+    restart: unless-stopped
 
+  # Frontend
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    environment:
+      - REACT_APP_API_URL=http://localhost:8000
+      - REACT_APP_ENVIRONMENT=development
     volumes:
       - ./frontend:/app
       - /app/node_modules
@@ -51,8 +91,17 @@ services:
       - "3000:3000"
     depends_on:
       - backend
+    networks:
+      - factsy-network
+    restart: unless-stopped
 
 volumes:
   postgres_data:
   neo4j_data:
+  neo4j_logs:
   redis_data:
+
+networks:
+  factsy-network:
+    driver: bridge
+
